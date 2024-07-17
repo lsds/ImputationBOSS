@@ -1,0 +1,91 @@
+--- a/include/xgboost/c_api.h	2022-08-29 00:00:00.000000000 +0100
++++ b/include/xgboost/c_api.h	2022-08-30 00:00:00.000000000 +0100
+@@ -502,6 +502,11 @@ XGB_DLL int XGProxyDMatrixSetDataCSR(DMatrixHandle handle, char const *indptr,
+                                      char const *indices, char const *data,
+                                      bst_ulong ncol);
+ 
++
++XGB_DLL int XGProxyDMatrixSetDataFromDT(DMatrixHandle handle, void** data,
++                                        const char** feature_stypes, bst_ulong nrow,
++                                        bst_ulong ncol);
++
+ /*
+  * ==========================- End data callback APIs ==========================
+  */
+--- a/src/c_api/c_api.cc	2022-08-29 00:00:00.000000000 +0100
++++ b/src/c_api/c_api.cc	2022-08-30 00:00:00.000000000 +0100
+@@ -325,6 +325,19 @@ XGB_DLL int XGProxyDMatrixSetDataCSR(DMatrixHandle handle, char const *indptr,
+   API_END();
+ }
+ 
++XGB_DLL int XGProxyDMatrixSetDataFromDT(DMatrixHandle handle, void** data,
++                                        const char** feature_stypes, bst_ulong nrow,
++                                        bst_ulong ncol) {
++  API_BEGIN();
++  CHECK_HANDLE();
++  auto p_m = static_cast<std::shared_ptr<xgboost::DMatrix>*>(handle);
++  CHECK(p_m);
++  auto m = static_cast<xgboost::data::DMatrixProxy*>(p_m->get());
++  CHECK(m) << "Current DMatrix type does not support set data.";
++  m->SetDataFromDT(data, feature_stypes, nrow, ncol);
++  API_END();
++}
++
+ // End Create from data iterator
+ 
+ XGB_DLL int XGDMatrixCreateFromCSREx(const size_t* indptr,
+--- a/src/data/adapter.h	2022-08-29 00:00:00.000000000 +0100
++++ b/src/data/adapter.h	2022-08-30 00:00:00.000000000 +0100
+@@ -576,6 +576,9 @@ class DataTableAdapterBatch : public detail::NoMetaInfo {
+     return Line(DTGetType(feature_stypes_[idx]), num_rows_, idx, data_[idx]);
+   }
+   static constexpr bool kIsRowMajor = false;
++  
++  size_t NumRows() const { return num_rows_; }
++  size_t NumCols() const { return num_features_; }
+ 
+  private:
+   void** data_;
+--- a/src/data/proxy_dmatrix.cc	2022-08-29 00:00:00.000000000 +0100
++++ b/src/data/proxy_dmatrix.cc	2022-08-30 00:00:00.000000000 +0100
+@@ -25,5 +25,16 @@ void DMatrixProxy::SetCSRData(char const *c_indptr, char const *c_indices,
+   this->Info().num_col_ = adapter->NumColumns();
+   this->Info().num_row_ = adapter->NumRows();
+ }
++
++
++void DMatrixProxy::SetDataFromDT(void** data, const char** feature_stypes,
++                                 bst_ulong nrow, bst_ulong ncol) {
++  std::shared_ptr<DataTableAdapter> adapter{
++      new DataTableAdapter(data, feature_stypes, nrow, ncol)};
++  this->batch_ = adapter;
++  this->Info().num_col_ = adapter->NumColumns();
++  this->Info().num_row_ = adapter->NumRows();
++}
++
+ }  // namespace data
+ }  // namespace xgboost
+--- a/src/data/proxy_dmatrix.h	2022-08-29 00:00:00.000000000 +0100
++++ b/src/data/proxy_dmatrix.h	2022-08-30 00:00:00.000000000 +0100
+@@ -76,6 +76,8 @@ class DMatrixProxy : public DMatrix {
+   void SetCSRData(char const *c_indptr, char const *c_indices,
+                   char const *c_values, bst_feature_t n_features,
+                   bool on_host);
++  void SetDataFromDT(void** data, const char** feature_stypes,
++                     bst_ulong nrow, bst_ulong ncol);
+ 
+   MetaInfo& Info() override { return info_; }
+   MetaInfo const& Info() const override { return info_; }
+@@ -137,6 +139,12 @@ decltype(auto) HostAdapterDispatch(DMatrixProxy const* proxy, Fn fn, bool* type_
+       *type_error = false;
+     }
+     return fn(value);
++  } else if(proxy->Adapter().type() == typeid(std::shared_ptr<DataTableAdapter>)) {
++    auto value = dmlc::get<std::shared_ptr<DataTableAdapter>>(proxy->Adapter())->Value();
++    if(type_error) {
++      *type_error = false;
++    }
++    return fn(value);
+   } else {
+     if (type_error) {
+       *type_error = true;
